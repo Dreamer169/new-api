@@ -20,7 +20,6 @@ func init() {
 	Register("discord", &DiscordProvider{})
 }
 
-// DiscordProvider implements OAuth for Discord
 type DiscordProvider struct{}
 
 type discordOAuthResponse struct {
@@ -36,6 +35,10 @@ type discordUser struct {
 	UID  string `json:"id"`
 	ID   string `json:"username"`
 	Name string `json:"global_name"`
+}
+
+type discordGuildMember struct {
+	Roles []string `json:"roles"`
 }
 
 func (p *DiscordProvider) GetName() string {
@@ -71,9 +74,7 @@ func (p *DiscordProvider) ExchangeToken(ctx context.Context, code string, c *gin
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
+	client := http.Client{Timeout: 5 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] ExchangeToken error: %s", err.Error()))
@@ -107,6 +108,51 @@ func (p *DiscordProvider) ExchangeToken(ctx context.Context, code string, c *gin
 	}, nil
 }
 
+func checkDiscordGuildMembership(ctx context.Context, accessToken, guildId, requiredRoleId string) error {
+	apiURL := fmt.Sprintf("https://discord.com/api/v10/users/@me/guilds/%s/member", guildId)
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	client := http.Client{Timeout: 5 * time.Second}
+	res, err := client.Do(req)
+	if err  != nil {
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] guild check error: %s", err.Error()))
+		return &AccessDeniedError{Message: "无法验证 Discord 服务器成员资格，请重试"}
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusForbidden {
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] user not in guild %s, status=%d", guildId, res.StatusCode))
+		return &AccessDeniedError{Message: "仅限特定 Discord 服务器成员注册"}
+	}
+	if res.StatusCode != http.StatusOK {
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] guild check failed status=%d", res.StatusCode))
+		return &AccessDeniedError{Message: "Discord 服务器成员资格验证失败，请重试"}
+	}
+
+	if requiredRoleId == "" {
+		return nil
+	}
+
+	var member discordGuildMember
+	if err := json.NewDecoder(res.Body).Decode(&member); err != nil {
+		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] guild member decode error: %s", err.Error()))
+		return &AccessDeniedError{Message: "Discord 成员信息解析失败"}
+	}
+
+	for _, roleId := range member.Roles {
+		if roleId == requiredRoleId {
+			return nil
+		}
+	}
+
+	logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] user missing required role %s in guild %s", requiredRoleId, guildId))
+	return &AccessDeniedError{Message: "仅限拥有「创作者」个服务器成员注册"}
+}
+
 func (p *DiscordProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*OAuthUser, error) {
 	logger.LogDebug(ctx, "[OAuth-Discord] GetUserInfo: fetching user info")
 
@@ -116,9 +162,7 @@ func (p *DiscordProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*
 	}
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
+	client := http.Client{Timeout: 5 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] GetUserInfo error: %s", err.Error()))
@@ -133,24 +177,32 @@ func (p *DiscordProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*
 		return nil, NewOAuthError(i18n.MsgOAuthGetUserErr, nil)
 	}
 
-	var discordUser discordUser
-	err = json.NewDecoder(res.Body).Decode(&discordUser)
+	var dUser discordUser
+	err = json.NewDecoder(res.Body).Decode(&dUser)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] GetUserInfo decode error: %s", err.Error()))
 		return nil, err
 	}
 
-	if discordUser.UID == "" || discordUser.ID == "" {
+	if dUser.UID == "" || dUser.ID == "" {
 		logger.LogError(ctx, "[OAuth-Discord] GetUserInfo failed: empty user fields")
 		return nil, NewOAuthError(i18n.MsgOAuthUserInfoEmpty, map[string]any{"Provider": "Discord"})
 	}
 
-	logger.LogDebug(ctx, "[OAuth-Discord] GetUserInfo success: uid=%s, username=%s, name=%s", discordUser.UID, discordUser.ID, discordUser.Name)
+	logger.LogDebug(ctx, "[OAuth-Discord] GetUserInfo success: uid=%s, username=%s", dUser.UID, dUser.ID)
+
+	// Check guild membership and role if configured
+	settings := system_setting.GetDiscordSettings()
+	if settings.RequiredGuildId != "" {
+		if err := checkDiscordGuildMembership(ctx, token.AccessToken, settings.RequiredGuildId, settings.RequiredRoleId); err != nil {
+			return nil, err
+		}
+	}
 
 	return &OAuthUser{
-		ProviderUserID: discordUser.UID,
-		Username:       discordUser.ID,
-		DisplayName:    discordUser.Name,
+		ProviderUserID: dUser.UID,
+		Username:       dUser.ID,
+		DisplayName:    dUser.Name,
 	}, nil
 }
 
