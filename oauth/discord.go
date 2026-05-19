@@ -118,9 +118,9 @@ func checkDiscordGuildMembership(ctx context.Context, accessToken, guildId, requ
 
 	client := http.Client{Timeout: 5 * time.Second}
 	res, err := client.Do(req)
-	if err  != nil {
+	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] guild check error: %s", err.Error()))
-		return &AccessDeniedError{Message: "无法验证 Discord 服务器成员资格，请重试"}
+		return &AccessDeniedError{Message: "无法验证 Discord 服务器成员资格，请稍后重试"}
 	}
 	defer res.Body.Close()
 
@@ -150,7 +150,7 @@ func checkDiscordGuildMembership(ctx context.Context, accessToken, guildId, requ
 	}
 
 	logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] user missing required role %s in guild %s", requiredRoleId, guildId))
-	return &AccessDeniedError{Message: "仅限拥有「创作者」个服务器成员注册"}
+	return &AccessDeniedError{Message: "仅限拥有「创作者」身份组的服务器成员注册"}
 }
 
 func (p *DiscordProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*OAuthUser, error) {
